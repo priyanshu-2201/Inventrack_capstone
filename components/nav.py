@@ -23,6 +23,7 @@ PAGE_ROUTES = {
     "Transactions": "pages/3_Transactions.py",
     "Data import": "pages/0_Data_Import.py",
     "Data Import": "pages/0_Data_Import.py",
+    "Forecasting": "pages/4_Forecasting.py",
 }
 
 
@@ -183,6 +184,8 @@ def render_sidebar_navigation(current_page="Dashboard", low_stock_count=0):
         active_slug = "inventory"
     elif "transaction" in cur_clean:
         active_slug = "transactions"
+    elif "forecast" in cur_clean:
+        active_slug = "forecasting"
     elif "import" in cur_clean:
         active_slug = "data_import"
     else:
@@ -212,8 +215,8 @@ def render_sidebar_navigation(current_page="Dashboard", low_stock_count=0):
     """, unsafe_allow_html=True)
 
     # Horizontal Top Navigation Tabs Bar
-    col_dash, col_inv, col_trans, col_data, col_space, col_status = st.columns(
-        [1.2, 1.5, 1.4, 1.4, 3.2, 1.5],
+    col_dash, col_inv, col_trans, col_data, col_forecast, col_space, col_status = st.columns(
+        [1.2, 1.5, 1.4, 1.4, 1.4, 1.8, 1.5],
         vertical_alignment="center"
     )
 
@@ -257,6 +260,17 @@ def render_sidebar_navigation(current_page="Dashboard", low_stock_count=0):
                 st.session_state['active_page'] = "Data Import"
                 try:
                     st.switch_page("pages/0_Data_Import.py")
+                except Exception:
+                    st.rerun()
+            else:
+                st.rerun()
+
+    with col_forecast:
+        if st.button("Forecasting", key="top_tab_forecasting", icon=":material/trending_up:", use_container_width=True):
+            if active_slug != "forecasting":
+                st.session_state['active_page'] = "Forecasting"
+                try:
+                    st.switch_page("pages/4_Forecasting.py")
                 except Exception:
                     st.rerun()
             else:

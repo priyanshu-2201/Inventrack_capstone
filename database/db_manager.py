@@ -9,6 +9,7 @@ import os
 import sqlite3
 import random
 import hashlib
+import numpy as np
 from datetime import datetime, timedelta
 import pandas as pd
 
@@ -994,11 +995,45 @@ def get_financial_kpis(user_id: int, timeframe: str = "All time", category: str 
 def get_weekly_sales_trend(user_id: int):
     """
     Returns the daily sales amounts for the last 7 calendar days strictly scoped to user_id.
+    If the account has recent sales ending today, uses the calendar week.
+    If the account only has historical/imported data, anchors to the latest transaction date.
     Returns: {'days': ['Mon', 'Tue', ...], 'sales': [float, ...], 'dates': ['YYYY-MM-DD', ...]}
     """
     now = datetime.now()
-    dates = [(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)]
-    days = [(now - timedelta(days=i)).strftime("%a") for i in range(6, -1, -1)]
+    anchor_dt = now
+
+    if user_id:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            # Check if there are sales in the last 7 calendar days from today
+            cutoff_now = (now - timedelta(days=6)).strftime("%Y-%m-%d")
+            cursor.execute("""
+                SELECT COUNT(*) as cnt FROM transactions
+                WHERE user_id = ? AND transaction_type = 'SALE' AND transaction_date >= ?
+            """, (user_id, cutoff_now))
+            cnt_row = cursor.fetchone()
+            recent_count = cnt_row["cnt"] if cnt_row else 0
+
+            # If no recent sales in current calendar week, anchor to latest recorded transaction date
+            if recent_count == 0:
+                cursor.execute("""
+                    SELECT MAX(transaction_date) as max_date FROM transactions
+                    WHERE user_id = ? AND transaction_type = 'SALE'
+                """, (user_id,))
+                max_row = cursor.fetchone()
+                if max_row and max_row["max_date"]:
+                    try:
+                        anchor_dt = datetime.strptime(str(max_row["max_date"]), "%Y-%m-%d")
+                    except Exception:
+                        anchor_dt = now
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+    dates = [(anchor_dt - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)]
+    days = [(anchor_dt - timedelta(days=i)).strftime("%a") for i in range(6, -1, -1)]
     sales_map = {d: 0.0 for d in dates}
 
     if user_id:
@@ -1009,9 +1044,9 @@ def get_weekly_sales_trend(user_id: int):
             cursor.execute("""
                 SELECT transaction_date, COALESCE(SUM(total_amount), 0.0) as daily_total
                 FROM transactions
-                WHERE user_id = ? AND transaction_type = 'SALE' AND transaction_date >= ?
+                WHERE user_id = ? AND transaction_type = 'SALE' AND transaction_date >= ? AND transaction_date <= ?
                 GROUP BY transaction_date
-            """, (user_id, start_date))
+            """, (user_id, start_date, dates[-1]))
             for row in cursor.fetchall():
                 d_str = str(row["transaction_date"])
                 if d_str in sales_map:
@@ -1044,7 +1079,10 @@ def validate_and_process_sales_csv(df: pd.DataFrame):
     date_aliases = ["date", "transaction_date", "order_date", "invoice_date", "txn_date"]
     pid_aliases = ["product_id", "productid", "sku", "item_id", "item_sku", "item_code", "code"]
     qty_aliases = ["quantity", "qty", "units", "volume", "count"]
-    price_aliases = ["unit_price", "unitprice", "price", "rate", "selling_price", "price_per_unit"]
+    price_aliases = [
+        "unit_price", "unitprice", "price", "rate", "selling_price",
+        "sale_price", "sales_price", "saleprice", "price_per_unit", "retail_price", "mrp"
+    ]
 
     pname_aliases = ["product_name", "productname", "name", "item_name", "item", "description"]
     cat_aliases = ["category", "item_category", "product_category", "department", "type"]
@@ -1052,6 +1090,8 @@ def validate_and_process_sales_csv(df: pd.DataFrame):
     party_aliases = ["customer_name", "customer", "party_name", "client", "buyer", "party", "supplier_name"]
     type_aliases = ["transaction_type", "type", "txn_type"]
     notes_aliases = ["notes", "note", "memo", "remarks", "invoice_no", "invoice"]
+    stock_aliases = ["current_stock", "stock_quantity", "stock", "quantity_in_stock", "qty_in_stock"]
+    reorder_aliases = ["reorder_level", "reorder_point", "reorder", "threshold", "min_stock"]
 
     def find_col(aliases):
         for a in aliases:
@@ -1063,19 +1103,21 @@ def validate_and_process_sales_csv(df: pd.DataFrame):
     col_pid = find_col(pid_aliases)
     col_qty = find_col(qty_aliases)
     col_price = find_col(price_aliases)
+    col_stock = find_col(stock_aliases)
+    col_reorder = find_col(reorder_aliases)
 
     missing_cols = []
     if not col_date:
         missing_cols.append("Date")
     if not col_pid:
-        missing_cols.append("Product_ID")
+        missing_cols.append("Product_ID / SKU")
     if not col_qty:
         missing_cols.append("Quantity")
     if not col_price:
-        missing_cols.append("Unit_Price")
+        missing_cols.append("Unit_Price / Sale_Price")
 
     if missing_cols:
-        return False, None, f"Missing required column(s): {', '.join(missing_cols)}. Expected: Date, Product_ID, Quantity, Unit_Price."
+        return False, None, f"Missing required column(s): {', '.join(missing_cols)}. Expected: Date, Product_ID/SKU, Quantity, Unit_Price/Sale_Price."
 
     df_clean = df.copy()
     df_clean["_parsed_date"] = pd.to_datetime(df_clean[col_date], errors="coerce")
@@ -1119,6 +1161,16 @@ def validate_and_process_sales_csv(df: pd.DataFrame):
     txn_codes = [f"TXN-IMP-{d.replace('-', '')}-{i+1:04d}" for i, d in enumerate(dates_str)]
     notes_series = df_clean[col_notes].astype(str).str.strip() if col_notes else "Imported via CSV"
 
+    if col_stock:
+        current_stocks = pd.to_numeric(df_clean[col_stock], errors="coerce").fillna(120).astype(int)
+    else:
+        current_stocks = pd.Series([120] * len(df_clean), index=df_clean.index)
+
+    if col_reorder:
+        reorder_levels = pd.to_numeric(df_clean[col_reorder], errors="coerce").fillna(20).astype(int)
+    else:
+        reorder_levels = pd.Series([20] * len(df_clean), index=df_clean.index)
+
     standardized_df = pd.DataFrame({
         "transaction_code": txn_codes,
         "transaction_type": txn_types,
@@ -1136,6 +1188,8 @@ def validate_and_process_sales_csv(df: pd.DataFrame):
         "party_name": parties,
         "transaction_date": dates_str,
         "notes": notes_series,
+        "current_stock": current_stocks,
+        "reorder_level": reorder_levels,
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     })
 
@@ -1186,16 +1240,24 @@ def import_csv_to_sqlite(standardized_df: pd.DataFrame, user_id: int, replace_ol
         """, txn_records)
 
         # Sync products catalog for this user
-        unique_prods = import_df.groupby("item_sku").agg({
+        agg_dict = {
             "item_name": "first",
             "category": "first",
             "unit_price": "mean",
             "cost_price": "mean",
             "quantity": "sum"
-        }).reset_index()
+        }
+        if "current_stock" in import_df.columns:
+            agg_dict["current_stock"] = "first"
+        if "reorder_level" in import_df.columns:
+            agg_dict["reorder_level"] = "first"
+
+        unique_prods = import_df.groupby("item_sku").agg(agg_dict).reset_index()
 
         prod_records = []
         for _, r in unique_prods.iterrows():
+            stk_qty = int(r["current_stock"]) if "current_stock" in r else 120
+            reord_lvl = int(r["reorder_level"]) if "reorder_level" in r else 20
             prod_records.append((
                 user_id,
                 str(r["item_sku"]).strip().upper(),
@@ -1203,8 +1265,8 @@ def import_csv_to_sqlite(standardized_df: pd.DataFrame, user_id: int, replace_ol
                 str(r["category"]).strip(),
                 round(float(r["unit_price"]), 2),
                 round(float(r["cost_price"]), 2),
-                120,
-                20,
+                stk_qty,
+                reord_lvl,
                 "Catalog record synchronized from imported sales dataset."
             ))
 
@@ -1352,6 +1414,212 @@ def search_products_and_transactions(user_id: int, query: str):
 
     conn.close()
     return {"products": prod_rows, "transactions": txn_rows}
+
+
+# -------------------------------------------------------------
+# STATISTICAL STOCK DEPLETION FORECAST (Scoped to user_id)
+# Uses numpy linear regression & pandas rolling statistics.
+# Read-only analytics — no schema changes.
+# -------------------------------------------------------------
+
+def get_stock_depletion_forecast(user_id: int):
+    """
+    Predict when each product will run out of stock based on historical
+    sales velocity.  Uses numpy polyfit (linear regression) for trend
+    detection and pandas groupby for daily sales aggregation.
+    All queries strictly scoped to user_id (tenant isolation).
+
+    Risk levels:
+        Critical  (red)    — stock = 0
+        Warning   (yellow) — days until stockout <= 7
+        Monitor   (orange) — 7 < days until stockout <= 21
+        Safe      (green)  — days until stockout > 21
+    """
+    empty_cols = [
+        "name", "sku", "category", "current_stock", "reorder_level",
+        "avg_daily_7d", "avg_daily_30d", "avg_daily_weighted",
+        "trend_slope", "trend_label", "days_until_stockout",
+        "stockout_date", "reorder_by", "risk_level"
+    ]
+    if not user_id:
+        return pd.DataFrame(columns=empty_cols)
+
+    conn = get_db_connection()
+    try:
+        # 1. Current stock snapshot for all products
+        products = pd.read_sql_query(
+            "SELECT id, name, sku, category, stock_quantity, reorder_level, unit_price "
+            "FROM products WHERE user_id = ? ORDER BY name ASC",
+            conn, params=(user_id,)
+        )
+        if products.empty:
+            return pd.DataFrame(columns=empty_cols)
+
+        now = datetime.now()
+        anchor_dt = now
+
+        # Check if transactions exist in last 30 days; if not, anchor to MAX(transaction_date)
+        cutoff_now = (now - timedelta(days=30)).strftime("%Y-%m-%d")
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT COUNT(*) as cnt FROM transactions
+                WHERE user_id = ? AND transaction_type = 'SALE' AND transaction_date >= ?
+            """, (user_id, cutoff_now))
+            cnt_row = cursor.fetchone()
+            recent_cnt = cnt_row["cnt"] if cnt_row else 0
+            if recent_cnt == 0:
+                cursor.execute("""
+                    SELECT MAX(transaction_date) as max_date FROM transactions
+                    WHERE user_id = ? AND transaction_type = 'SALE'
+                """, (user_id,))
+                max_r = cursor.fetchone()
+                if max_r and max_r["max_date"]:
+                    try:
+                        anchor_dt = datetime.strptime(str(max_r["max_date"]), "%Y-%m-%d")
+                    except Exception:
+                        anchor_dt = now
+        except Exception:
+            pass
+
+        cutoff_7 = (anchor_dt - timedelta(days=7)).strftime("%Y-%m-%d")
+        cutoff_30 = (anchor_dt - timedelta(days=30)).strftime("%Y-%m-%d")
+
+        # 2. Daily sales quantities per product (across transaction history)
+        #    Join by item_id or item_name for 100% reliable matching
+        sales = pd.read_sql_query(
+            "SELECT item_id, item_name, transaction_date, SUM(quantity) AS qty_sold "
+            "FROM transactions "
+            "WHERE user_id = ? AND transaction_type = 'SALE' "
+            "GROUP BY item_id, item_name, transaction_date",
+            conn, params=(user_id,)
+        )
+
+        forecasts = []
+        for _, prod in products.iterrows():
+            pid = prod["id"]
+            prod_name = str(prod["name"]).strip().lower()
+            current_stock = float(prod["stock_quantity"])
+
+            if not sales.empty:
+                prod_sales = sales[
+                    (sales["item_id"] == pid) | 
+                    (sales["item_name"].astype(str).str.strip().str.lower() == prod_name)
+                ].copy()
+            else:
+                prod_sales = pd.DataFrame()
+
+            if not prod_sales.empty:
+                prod_sales["transaction_date"] = pd.to_datetime(
+                    prod_sales["transaction_date"], errors="coerce"
+                )
+                prod_sales = prod_sales.dropna(subset=["transaction_date"])
+
+                # --- 7-day & 30-day average daily velocity ---
+                mask_7 = prod_sales["transaction_date"] >= pd.Timestamp(cutoff_7)
+                mask_30 = prod_sales["transaction_date"] >= pd.Timestamp(cutoff_30)
+                sales_7d = float(prod_sales.loc[mask_7, "qty_sold"].sum())
+                sales_30d = float(prod_sales.loc[mask_30, "qty_sold"].sum())
+
+                avg_daily_7d = sales_7d / 7.0
+                avg_daily_30d = sales_30d / 30.0
+
+                # Weighted velocity (60% 7-day + 40% 30-day) with historical fallback
+                if avg_daily_7d > 0:
+                    avg_daily = avg_daily_7d * 0.6 + avg_daily_30d * 0.4
+                elif avg_daily_30d > 0:
+                    avg_daily = avg_daily_30d
+                else:
+                    # Fallback: compute average daily sales from active transaction history
+                    total_sold = float(prod_sales["qty_sold"].sum())
+                    min_sale_date = prod_sales["transaction_date"].min()
+                    active_days = max(30, (anchor_dt - min_sale_date).days)
+                    avg_daily = round(total_sold / active_days, 2)
+
+                # --- Numpy linear regression for trend direction ---
+                prod_sales_30 = prod_sales[prod_sales["transaction_date"] >= pd.Timestamp(cutoff_30)]
+                reg_source = prod_sales_30 if len(prod_sales_30) >= 2 else prod_sales
+                reg_source = reg_source.sort_values("transaction_date")
+                day_origin = reg_source["transaction_date"].min()
+                reg_source["day_num"] = (
+                    reg_source["transaction_date"] - day_origin
+                ).dt.days.astype(float)
+
+                if len(reg_source) >= 2:
+                    x = reg_source["day_num"].values
+                    y = reg_source["qty_sold"].values.astype(float)
+                    coeffs = np.polyfit(x, y, 1)  # [slope, intercept]
+                    trend_slope = float(coeffs[0])
+                else:
+                    trend_slope = 0.0
+
+                # --- Stockout projection ---
+                if current_stock <= 0:
+                    days_left = 0.0
+                    stockout_date = "Out of Stock"
+                    reorder_by = "Immediate"
+                elif avg_daily > 0:
+                    days_left = current_stock / avg_daily
+                    stockout_dt = anchor_dt + timedelta(days=days_left)
+                    stockout_date = stockout_dt.strftime("%d %b %Y")
+                    reorder_by = (anchor_dt + timedelta(days=max(0, days_left - 3))).strftime("%d %b %Y")
+                else:
+                    days_left = 180.0
+                    stockout_date = "180+ days (Safe)"
+                    reorder_by = "—"
+
+                trend_label = (
+                    "↑ Rising" if trend_slope > 0.05
+                    else "↓ Falling" if trend_slope < -0.05
+                    else "→ Stable"
+                )
+            else:
+                avg_daily_7d = 0.0
+                avg_daily_30d = 0.0
+                avg_daily = 0.0
+                if current_stock <= 0:
+                    days_left = 0.0
+                    stockout_date = "Out of Stock"
+                    reorder_by = "Immediate"
+                else:
+                    days_left = 180.0
+                    stockout_date = "180+ days (No sales)"
+                    reorder_by = "—"
+                trend_slope = 0.0
+                trend_label = "— No data"
+
+            # --- Risk classification ---
+            if current_stock <= 0:
+                risk = "Critical"
+            elif days_left is not None and days_left <= 7:
+                risk = "Warning"
+            elif days_left is not None and days_left <= 21:
+                risk = "Monitor"
+            else:
+                risk = "Safe"
+
+            forecasts.append({
+                "name": prod["name"],
+                "sku": prod["sku"],
+                "category": prod["category"],
+                "current_stock": int(current_stock),
+                "reorder_level": int(prod["reorder_level"]),
+                "avg_daily_7d": round(avg_daily_7d, 2),
+                "avg_daily_30d": round(avg_daily_30d, 2),
+                "avg_daily_weighted": round(avg_daily, 2),
+                "trend_slope": round(trend_slope, 3),
+                "trend_label": trend_label,
+                "days_until_stockout": round(days_left, 1) if days_left is not None else None,
+                "stockout_date": stockout_date,
+                "reorder_by": reorder_by,
+                "risk_level": risk,
+            })
+
+        return pd.DataFrame(forecasts)
+    except Exception:
+        return pd.DataFrame(columns=empty_cols)
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

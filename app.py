@@ -187,17 +187,24 @@ def record_sale_modal(current_user_id):
     }
     selected_label = st.selectbox("Select Product to Sell", list(prod_options.keys()), key="modal_sale_prod")
     selected_prod = prod_options[selected_label]
+    prod_id = selected_prod["id"]
+    available_stock = int(selected_prod["stock_quantity"])
+
+    if available_stock <= 0:
+        st.warning(f"⚠️ **{selected_prod['name']}** is currently out of stock (0 units). Stock must be added before recording sales.")
 
     with st.form("modal_record_sale_form", clear_on_submit=False):
         c1, c2 = st.columns(2)
         with c1:
+            max_qty = max(1, available_stock)
             qty = st.number_input(
                 "Quantity Sold",
                 min_value=1,
-                max_value=max(1, int(selected_prod["stock_quantity"])),
+                max_value=max_qty,
                 value=1,
                 step=1,
-                key="modal_sale_qty"
+                key=f"modal_sale_qty_{prod_id}",
+                disabled=(available_stock <= 0)
             )
         with c2:
             unit_price = st.number_input(
@@ -205,7 +212,7 @@ def record_sale_modal(current_user_id):
                 min_value=0.0,
                 value=float(selected_prod["unit_price"]),
                 step=10.0,
-                key="modal_sale_price"
+                key=f"modal_sale_price_{prod_id}"
             )
 
         c3, c4 = st.columns(2)
@@ -531,49 +538,68 @@ viz_c1, viz_c2 = st.columns([1.5, 1.0])
 # Left Column: Sales this week Bar Chart (Live Daily SQL Query)
 with viz_c1:
     with st.container(border=True):
-        st.markdown("""
-            <div class="viz-title">Sales this week</div>
-            <div class="viz-subtitle">Sample trend · ₹ per day</div>
-        """, unsafe_allow_html=True)
-
         weekly_trend = get_weekly_sales_trend(user_id=user_id)
         bar_days = weekly_trend["days"]
         bar_sales = weekly_trend["sales"]
+        bar_dates = weekly_trend.get("dates", [])
 
-        fig_sales = go.Figure(data=[
-            go.Bar(
-                x=bar_days,
-                y=bar_sales,
-                marker=dict(
-                    color="#2563eb",
-                    line_width=0,
-                    cornerradius=4
+        date_subtitle = f"{bar_dates[0]} to {bar_dates[-1]} · ₹ per day" if bar_dates else "Latest 7 days · ₹ per day"
+
+        st.markdown(f"""
+            <div class="viz-title">Sales this week</div>
+            <div class="viz-subtitle">{date_subtitle}</div>
+        """, unsafe_allow_html=True)
+
+        total_week_sales = sum(bar_sales)
+
+        if total_week_sales > 0:
+            fig_sales = go.Figure(data=[
+                go.Bar(
+                    x=bar_days,
+                    y=bar_sales,
+                    marker=dict(
+                        color="#2563eb",
+                        line_width=0,
+                        cornerradius=4
+                    ),
+                    text=[f"₹{s/1000:.1f}k" if s >= 1000 else (f"₹{s:.0f}" if s > 0 else "") for s in bar_sales],
+                    textposition="outside",
+                    textfont=dict(color="#64748b", size=10),
+                    hovertemplate="<b>%{x}:</b> ₹%{y:,.2f}<extra></extra>"
+                )
+            ])
+
+            fig_sales.update_layout(
+                template="plotly_white",
+                height=250,
+                margin=dict(t=25, b=20, l=10, r=10),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                bargap=0.35,
+                xaxis=dict(
+                    showgrid=False,
+                    showline=False,
+                    showticklabels=True,
+                    tickfont=dict(color="#64748b", size=11),
+                    zeroline=False
                 ),
-                hovertemplate="<b>%{x}:</b> ₹%{y:,.2f}<extra></extra>"
+                yaxis=dict(
+                    showgrid=True,
+                    gridcolor="#f1f5f9",
+                    showline=False,
+                    showticklabels=False,
+                    zeroline=False
+                )
             )
-        ])
-
-        fig_sales.update_layout(
-            template="plotly_white",
-            height=250,
-            margin=dict(t=10, b=20, l=10, r=10),
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            bargap=0.35,
-            xaxis=dict(
-                showgrid=False,
-                showline=False,
-                showticklabels=False,
-                zeroline=False
-            ),
-            yaxis=dict(
-                showgrid=False,
-                showline=False,
-                showticklabels=False,
-                zeroline=False
-            )
-        )
-        st.plotly_chart(fig_sales, use_container_width=True, config={'displayModeBar': False})
+            st.plotly_chart(fig_sales, use_container_width=True, config={'displayModeBar': False})
+        else:
+            st.markdown("""
+                <div style="height: 180px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #94a3b8; text-align: center;">
+                    <div style="font-size: 2rem; margin-bottom: 0.5rem;">📊</div>
+                    <div style="font-size: 0.9rem; font-weight: 500;">No sales recorded for this period</div>
+                    <div style="font-size: 0.8rem; color: #cbd5e1; margin-top: 0.2rem;">Record a sale or import CSV transactions to see daily trends</div>
+                </div>
+            """, unsafe_allow_html=True)
 
 # Right Column: Stock on shelves Donut Chart (Live SQL Product Health Counts)
 with viz_c2:
