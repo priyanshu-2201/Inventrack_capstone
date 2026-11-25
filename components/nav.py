@@ -14,8 +14,44 @@ from database.db_manager import (
     get_user_by_id,
     get_low_stock_items,
     search_products_and_transactions,
+    get_user_by_session_token,
+    delete_user_session,
     DB_PATH
 )
+
+
+def ensure_authenticated_session():
+    """
+    Ensures user remains logged in across browser refreshes and page switches.
+    Checks st.session_state first, then query_params['session'] from SQLite user_sessions.
+    Returns (authenticated: bool, user_id: int | None, username: str | None).
+    """
+    # 1. If already valid in session state
+    if st.session_state.get("authenticated") and st.session_state.get("user_id"):
+        # Make sure session token is synchronized in query params so browser reload won't log out
+        token = st.session_state.get("session_token")
+        if token and st.query_params.get("session") != token:
+            st.query_params["session"] = token
+        return True, st.session_state["user_id"], st.session_state.get("username")
+
+    # 2. Check query_params for persistent session token (e.g. after Chrome F5 / reload)
+    token = st.query_params.get("session")
+    if token:
+        user_info = get_user_by_session_token(token)
+        if user_info:
+            st.session_state["authenticated"] = True
+            st.session_state["user_id"] = user_info["id"]
+            st.session_state["username"] = user_info["username"]
+            st.session_state["session_token"] = token
+            return True, user_info["id"], user_info["username"]
+        else:
+            # Token is stale/invalid
+            try:
+                del st.query_params["session"]
+            except Exception:
+                pass
+
+    return False, None, None
 
 PAGE_ROUTES = {
     "Dashboard": "app.py",
@@ -83,6 +119,13 @@ def render_top_header(username: str = None):
                 st.markdown("**Platform:** Inventrack B2B SaaS")
                 st.divider()
                 if st.button("🚪 Log out", key="popover_logout", use_container_width=True):
+                    active_token = st.session_state.get("session_token") or st.query_params.get("session")
+                    if active_token:
+                        delete_user_session(active_token)
+                    try:
+                        del st.query_params["session"]
+                    except Exception:
+                        pass
                     st.session_state.clear()
                     st.rerun()
 

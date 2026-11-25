@@ -22,9 +22,14 @@ from database.db_manager import (
     get_all_products,
     create_user,
     verify_user,
+    create_user_session,
     DB_PATH
 )
-from components.nav import render_sidebar_navigation, render_top_header
+from components.nav import (
+    render_sidebar_navigation,
+    render_top_header,
+    ensure_authenticated_session
+)
 
 # Page configuration
 st.set_page_config(
@@ -91,10 +96,9 @@ init_db()
 # -------------------------------------------------------------
 # AUTHENTICATION GATEWAY
 # -------------------------------------------------------------
-if "authenticated" not in st.session_state:
-    st.session_state["authenticated"] = False
+is_auth, active_uid, active_uname = ensure_authenticated_session()
 
-if not st.session_state["authenticated"] or not st.session_state.get("user_id"):
+if not is_auth or not active_uid:
     _, col_login, _ = st.columns([1, 1.4, 1])
     with col_login:
         st.markdown("""
@@ -126,9 +130,12 @@ if not st.session_state["authenticated"] or not st.session_state.get("user_id"):
                     else:
                         user_id = verify_user(login_user, login_pass)
                         if user_id:
+                            session_token = create_user_session(user_id)
+                            st.query_params["session"] = session_token
                             st.session_state["authenticated"] = True
                             st.session_state["username"] = login_user.strip()
                             st.session_state["user_id"] = user_id
+                            st.session_state["session_token"] = session_token
                             st.success("Authentication successful. Opening store dashboard...")
                             st.rerun()
                         else:
@@ -263,6 +270,10 @@ low_count = len(low_stock_items)
 render_top_header(username=username)
 render_sidebar_navigation(current_page="Dashboard", low_stock_count=low_count)
 
+# Refresh toast notification
+if st.session_state.pop("dashboard_refreshed_toast", False):
+    st.toast("Dashboard refreshed with latest data!", icon="🔄")
+
 # -------------------------------------------------------------
 # 2. HEADER & TOP CONTROLS
 # -------------------------------------------------------------
@@ -278,7 +289,6 @@ with hdr_left:
     """, unsafe_allow_html=True)
 
 with hdr_right:
-    st.markdown('<div class="action-btn-row">', unsafe_allow_html=True)
     btn_col1, btn_col2, btn_col3 = st.columns([1.15, 1.05, 0.95], vertical_alignment="center")
     with btn_col1:
         if st.button("Record a sale", icon=":material/point_of_sale:", key="btn_record_sale", use_container_width=True):
@@ -290,8 +300,8 @@ with hdr_right:
     with btn_col3:
         if st.button("Refresh", icon=":material/refresh:", key="btn_refresh", use_container_width=True):
             st.cache_data.clear()
+            st.session_state["dashboard_refreshed_toast"] = True
             st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
 
 # -------------------------------------------------------------
 # 3. FILTER PILLS & CATEGORY DROPDOWN (Tight Horizontal Container)

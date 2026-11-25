@@ -18,7 +18,7 @@ from database.db_manager import (
     get_inventory_summary_metrics,
     get_pnl_and_moving_averages
 )
-from components.nav import render_sidebar_navigation, render_top_header
+from components.nav import render_sidebar_navigation, render_top_header, ensure_authenticated_session
 
 def create_pastel_card(title: str, value: str, subtitle: str = "", bg_color: str = "#ffffff", extra_html: str = ""):
     """
@@ -68,13 +68,12 @@ if os.path.exists(css_path):
         st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
 
 # Authentication Guard
-if not st.session_state.get("authenticated", False) or not st.session_state.get("user_id"):
+is_auth, user_id, username = ensure_authenticated_session()
+if not is_auth or not user_id:
     st.warning("Access restricted. Please authenticate via the main portal.")
     if st.button("Go to Login Gateway"):
         st.switch_page("app.py")
     st.stop()
-
-user_id = st.session_state["user_id"]
 
 # Render Global Top Header & Sidebar Navigation
 render_top_header()
