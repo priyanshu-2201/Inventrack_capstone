@@ -38,11 +38,16 @@ if not is_auth or not user_id:
         st.switch_page("app.py")
     st.stop()
 
-# Sale Completion Animation Check (Top of rendering cycle)
-if st.session_state.get('sale_success', False):
-    st.balloons()
-    st.toast("Sale recorded successfully!", icon="🎉")
-    st.session_state['sale_success'] = False
+# Transaction Completion Feedback & Animation Check (Top of rendering cycle)
+if st.session_state.get('transaction_success_msg'):
+    success_msg = st.session_state.pop('transaction_success_msg')
+    is_sale_completed = st.session_state.pop('sale_success', False)
+    if is_sale_completed:
+        st.balloons()
+        st.toast("Sale recorded and stock dispatched!", icon="🎉")
+    else:
+        st.toast("Purchase recorded and stock received!", icon="📦")
+    st.success(f"✅ {success_msg}")
 
 # Render Global Top Header & Sidebar Navigation
 render_top_header()
@@ -63,10 +68,9 @@ st.markdown("""
     </div>
 """, unsafe_allow_html=True)
 
-tab_log, tab_ledger, tab_receipt = st.tabs([
+tab_log, tab_ledger = st.tabs([
     "Log New Transaction",
-    "Transaction Ledger & History",
-    "Digital Invoice & Receipt"
+    "Transaction Ledger & History"
 ])
 
 
@@ -87,107 +91,121 @@ with tab_log:
     products_df = get_all_products(user_id=user_id)
     materials_df = get_all_raw_materials(user_id=user_id)
 
-    with st.form("form_transaction_entry", clear_on_submit=False):
-        c1, c2 = st.columns(2)
+    c1, c2 = st.columns(2)
 
-        with c1:
-            txn_category = st.radio(
-                "Transaction Flow *",
-                ["Customer Sale (Reduces Stock)", "Inbound Procurement (Adds Stock)"],
-                horizontal=True
+    with c1:
+        txn_category = st.radio(
+            "Transaction Flow *",
+            ["Customer Sale (Reduces Stock)", "Inbound Procurement (Adds Stock)"],
+            horizontal=True,
+            key="radio_txn_flow"
+        )
+        is_sale = "Sale" in txn_category
+        txn_type = "SALE" if is_sale else "PURCHASE"
+
+        # Determine Target Type
+        target_item_type = st.radio(
+            "Item Type *",
+            ["Finished Product", "Raw Material"],
+            horizontal=True,
+            key=f"radio_item_type_{'sale' if is_sale else 'purch'}"
+        )
+
+        is_product = target_item_type == "Finished Product"
+        item_type_db = "PRODUCT" if is_product else "RAW_MATERIAL"
+
+        # Dynamic item selector with live stock information
+        if is_product:
+            if not products_df.empty:
+                item_options = {
+                    f"{r['name']} ({r['sku']}) | In Stock: {r['stock_quantity']} units": (
+                        r['id'], float(r['unit_price']), float(r['cost_price']), float(r['stock_quantity'])
+                    )
+                    for _, r in products_df.iterrows()
+                }
+                selected_label = st.selectbox("Select Finished Product *", list(item_options.keys()), key="sel_prod_item")
+                selected_item_id, prod_sell_price, prod_cost_price, curr_stock = item_options[selected_label]
+                # Default price: if sale, use unit_price; if purchase, use cost_price
+                suggested_price = prod_sell_price if is_sale else (prod_cost_price if prod_cost_price > 0 else prod_sell_price)
+            else:
+                st.error("No finished products found in your catalog.")
+                selected_item_id, suggested_price, curr_stock = None, 0.0, 0.0
+        else:
+            if not materials_df.empty:
+                item_options = {
+                    f"{r['name']} ({r['code']}) | In Stock: {r['stock_quantity']} {r['unit']}": (
+                        r['id'], float(r['unit_cost']), float(r['stock_quantity'])
+                    )
+                    for _, r in materials_df.iterrows()
+                }
+                selected_label = st.selectbox("Select Raw Material *", list(item_options.keys()), key="sel_mat_item")
+                selected_item_id, suggested_price, curr_stock = item_options[selected_label]
+            else:
+                st.error("No raw materials found in your inventory.")
+                selected_item_id, suggested_price, curr_stock = None, 0.0, 0.0
+
+    with c2:
+        st.markdown("##### Commercial Terms")
+        q_col, p_col = st.columns(2)
+        with q_col:
+            txn_qty = st.number_input("Quantity *", min_value=1.0, value=1.0, step=1.0, key="input_txn_qty")
+        with p_col:
+            init_price = float(suggested_price) if suggested_price and suggested_price > 0 else 0.0
+            txn_price = st.number_input(
+                "Unit Price / Cost (₹) *",
+                min_value=0.0,
+                value=init_price,
+                step=10.0,
+                key=f"input_txn_price_{selected_item_id}_{'sale' if is_sale else 'purch'}"
             )
-            is_sale = "Sale" in txn_category
-            txn_type = "SALE" if is_sale else "PURCHASE"
 
-            # Determine Target Type
-            if is_sale:
-                target_item_type = st.radio("Item Type *", ["Finished Product", "Raw Material"], horizontal=True)
+        total_calc = round(txn_qty * txn_price, 2)
+        st.markdown(f"""
+            <div style="background: #f0fdf4; border: 1px dashed #22c55e; border-radius: 8px; padding: 0.6rem 1rem; margin: 0.5rem 0 1rem 0;">
+                <span style="font-size: 0.85rem; color: #166534;">Calculated Line Total:</span>
+                <strong style="color: #15803d; font-size: 1.25rem; margin-left: 0.5rem;">₹{total_calc:,.2f}</strong>
+            </div>
+        """, unsafe_allow_html=True)
+
+        party_label = "Customer / Client Name *" if is_sale else "Supplier / Vendor Name *"
+        party_placeholder = "e.g. Aura Wellness Boutique" if is_sale else "e.g. Provence Organics Co."
+        txn_party = st.text_input(party_label, placeholder=party_placeholder, key="input_txn_party")
+
+        d_col, n_col = st.columns([1, 1])
+        with d_col:
+            txn_date = st.date_input("Transaction Date", value=date.today(), key="input_txn_date")
+        with n_col:
+            txn_notes = st.text_input("Invoice / Memo Ref", placeholder="e.g. INV-9042, Net 30, Paid via Wire", key="input_txn_notes")
+
+    # Submit Button (Active reactive trigger)
+    btn_label = "Confirm Sale & Dispatch Stock" if is_sale else "Confirm PO & Receive Stock"
+    submit_btn = st.button(btn_label, use_container_width=True, type="primary", key="btn_submit_txn")
+
+    if submit_btn:
+        if not selected_item_id:
+            st.error("Please select a valid inventory item.")
+        elif not txn_party.strip():
+            st.error(f"Please provide the {'Customer' if is_sale else 'Supplier'} party name.")
+        elif is_sale and txn_qty > curr_stock:
+            st.error(f"Cannot complete sale: requested {txn_qty:g} units, but only {curr_stock:g} available in stock!")
+        else:
+            success, msg = log_transaction(
+                user_id=user_id,
+                transaction_type=txn_type,
+                item_type=item_type_db,
+                item_id=selected_item_id,
+                quantity=txn_qty,
+                unit_price=txn_price,
+                party_name=txn_party.strip(),
+                transaction_date=txn_date.strftime("%Y-%m-%d"),
+                notes=txn_notes.strip()
+            )
+            if success:
+                st.session_state['transaction_success_msg'] = msg
+                st.session_state['sale_success'] = is_sale
+                st.rerun()
             else:
-                target_item_type = st.radio("Item Type *", ["Raw Material", "Finished Product"], horizontal=True)
-
-            is_product = target_item_type == "Finished Product"
-            item_type_db = "PRODUCT" if is_product else "RAW_MATERIAL"
-
-            # Dynamic item selector with live stock information
-            if is_product:
-                if not products_df.empty:
-                    item_options = {
-                        f"{r['name']} ({r['sku']}) | In Stock: {r['stock_quantity']} units": (r['id'], r['unit_price'], r['stock_quantity'])
-                        for _, r in products_df.iterrows()
-                    }
-                    selected_label = st.selectbox("Select Finished Product *", list(item_options.keys()))
-                    selected_item_id, default_price, curr_stock = item_options[selected_label]
-                else:
-                    st.error("No finished products found in your catalog.")
-                    selected_item_id, default_price, curr_stock = None, 0.0, 0
-            else:
-                if not materials_df.empty:
-                    item_options = {
-                        f"{r['name']} ({r['code']}) | In Stock: {r['stock_quantity']} {r['unit']}": (r['id'], r['unit_cost'], r['stock_quantity'])
-                        for _, r in materials_df.iterrows()
-                    }
-                    selected_label = st.selectbox("Select Raw Material *", list(item_options.keys()))
-                    selected_item_id, default_price, curr_stock = item_options[selected_label]
-                else:
-                    st.error("No raw materials found in your inventory.")
-                    selected_item_id, default_price, curr_stock = None, 0.0, 0
-
-        with c2:
-            st.markdown("##### Commercial Terms")
-            q_col, p_col = st.columns(2)
-            with q_col:
-                txn_qty = st.number_input("Quantity *", min_value=1.0, value=5.0, step=1.0)
-            with p_col:
-                init_price = float(default_price) if default_price and default_price > 0 else 0.0
-                txn_price = st.number_input("Unit Price / Cost (₹) *", min_value=0.0, value=init_price, step=0.50)
-
-            total_calc = round(txn_qty * txn_price, 2)
-            st.markdown(f"""
-                <div style="background: #f0fdf4; border: 1px dashed #22c55e; border-radius: 8px; padding: 0.6rem 1rem; margin: 0.5rem 0 1rem 0;">
-                    <span style="font-size: 0.85rem; color: #166534;">Calculated Line Total:</span>
-                    <strong style="color: #15803d; font-size: 1.25rem; margin-left: 0.5rem;">₹{total_calc:,.2f}</strong>
-                </div>
-            """, unsafe_allow_html=True)
-
-            party_label = "Customer / Client Name *" if is_sale else "Supplier / Vendor Name *"
-            party_placeholder = "e.g. Aura Wellness Boutique" if is_sale else "e.g. Provence Organics Co."
-            txn_party = st.text_input(party_label, placeholder=party_placeholder)
-
-            d_col, n_col = st.columns([1, 1])
-            with d_col:
-                txn_date = st.date_input("Transaction Date", value=date.today())
-            with n_col:
-                txn_notes = st.text_input("Invoice / Memo Ref", placeholder="e.g. INV-9042, Net 30, Paid via Wire")
-
-        # Submit Button
-        btn_label = "Confirm Sale & Dispatch Stock" if is_sale else "Confirm PO & Receive Stock"
-        submit_btn = st.form_submit_button(btn_label, use_container_width=True, type="primary")
-
-        if submit_btn:
-            if not selected_item_id:
-                st.error("Please select a valid inventory item.")
-            elif not txn_party.strip():
-                st.error("Please provide the Customer or Supplier party name.")
-            elif is_sale and txn_qty > curr_stock:
-                st.error(f"Cannot complete sale: requested {txn_qty} units, but only {curr_stock} available in stock!")
-            else:
-                success, msg = log_transaction(
-                    user_id=user_id,
-                    transaction_type=txn_type,
-                    item_type=item_type_db,
-                    item_id=selected_item_id,
-                    quantity=txn_qty,
-                    unit_price=txn_price,
-                    party_name=txn_party,
-                    transaction_date=txn_date.strftime("%Y-%m-%d"),
-                    notes=txn_notes
-                )
-                if success:
-                    st.session_state['sale_success'] = True
-                    st.success(f"{msg} - Sale recorded successfully!")
-                    # Do NOT trigger st.rerun() immediately inside the submission block
-                else:
-                    st.error(msg)
+                st.error(msg)
 
 
 # =============================================================
@@ -279,91 +297,3 @@ with tab_ledger:
             )
     else:
         st.info("No transaction records match the specified filters.")
-
-
-# =============================================================
-# TAB 3: DIGITAL INVOICE & RECEIPT (Scoped to user_id)
-# =============================================================
-with tab_receipt:
-    st.markdown("### Digital Invoice Generator")
-    st.write("Generate a printable invoice slip for any past transaction in your account.")
-
-    if not transactions_df.empty:
-        txn_map = {
-            f"[{row['transaction_code']}] {row['transaction_date']} - {row['party_name']} (₹{row['total_amount']:,.2f})": row['id']
-            for _, row in transactions_df.iterrows()
-        }
-        selected_txn_str = st.selectbox("Select Transaction Record", list(txn_map.keys()), key="receipt_sel")
-        target_id = txn_map[selected_txn_str]
-        selected_record = transactions_df[transactions_df["id"] == target_id].iloc[0]
-
-        is_receipt_sale = selected_record["transaction_type"] == "SALE"
-
-        # Modern SaaS Invoice Slip
-        st.markdown(f"""
-            <div style="max-width: 650px; margin: 1.5rem auto; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 16px; padding: 2rem; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);">
-                <div style="display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 1px solid #f1f5f9; padding-bottom: 1.2rem; margin-bottom: 1.5rem;">
-                    <div>
-                        <div style="font-size: 1.5rem; font-weight: 800; color: #1e293b; letter-spacing: -0.02em;">INVENTRACK INVOICE</div>
-                        <div style="font-size: 0.85rem; color: #64748b;">Enterprise Store Order &amp; Receipt</div>
-                    </div>
-                    <div style="text-align: right;">
-                        <span class="badge {'badge-emerald' if is_receipt_sale else 'badge-blue'}">{selected_record['transaction_type']}</span>
-                        <div style="font-family: monospace; font-size: 0.9rem; font-weight: 700; color: #0284c7; margin-top: 4px;">{selected_record['transaction_code']}</div>
-                    </div>
-                </div>
-
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 1.5rem; font-size: 0.9rem;">
-                    <div>
-                        <div style="color: #64748b; font-size: 0.75rem; text-transform: uppercase; font-weight: 700;">Counter Party</div>
-                        <div style="font-size: 1.1rem; font-weight: 700; color: #1e293b; margin-top: 2px;">{selected_record['party_name']}</div>
-                        <div style="color: #10b981; font-size: 0.85rem; font-weight: 600;">Completed &amp; Reconciled</div>
-                    </div>
-                    <div style="text-align: right;">
-                        <div style="color: #64748b; font-size: 0.75rem; text-transform: uppercase; font-weight: 700;">Transaction Date</div>
-                        <div style="font-size: 1.1rem; font-weight: 700; color: #1e293b; margin-top: 2px;">{selected_record['transaction_date']}</div>
-                        <div style="color: #64748b; font-size: 0.85rem;">Timestamp: {str(selected_record['created_at'])[:19]}</div>
-                    </div>
-                </div>
-
-                <table style="width: 100%; border-collapse: collapse; margin-bottom: 1.5rem; font-size: 0.9rem;">
-                    <thead>
-                        <tr style="background: #f8fafc; border-bottom: 1px solid #e2e8f0; text-align: left;">
-                            <th style="padding: 0.6rem 0.8rem; color: #475569;">Item Description</th>
-                            <th style="padding: 0.6rem 0.8rem; text-align: center; color: #475569;">Qty</th>
-                            <th style="padding: 0.6rem 0.8rem; text-align: right; color: #475569;">Rate</th>
-                            <th style="padding: 0.6rem 0.8rem; text-align: right; color: #475569;">Amount</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <tr style="border-bottom: 1px solid #f1f5f9;">
-                            <td style="padding: 0.8rem; color: #1e293b;">
-                                <strong style="color: #1e293b;">{selected_record['item_name']}</strong><br>
-                                <span style="font-size: 0.8rem; color: #64748b;">Classification: {selected_record['item_type']}</span>
-                            </td>
-                            <td style="padding: 0.8rem; text-align: center; color: #1e293b;">{selected_record['quantity']}</td>
-                            <td style="padding: 0.8rem; text-align: right; color: #1e293b;">₹{selected_record['unit_price']:,.2f}</td>
-                            <td style="padding: 0.8rem; text-align: right; font-weight: 700; color: #0284c7;">₹{selected_record['total_amount']:,.2f}</td>
-                        </tr>
-                    </tbody>
-                </table>
-
-                <div style="display: flex; justify-content: space-between; align-items: center; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 1rem 1.2rem;">
-                    <div>
-                        <div style="font-size: 0.8rem; color: #64748b;">Audit Memo / Notes:</div>
-                        <div style="font-size: 0.85rem; color: #334155; font-style: italic;">{selected_record['notes'] or 'Standard system transaction log'}</div>
-                    </div>
-                    <div style="text-align: right;">
-                        <div style="font-size: 0.75rem; color: #64748b; text-transform: uppercase;">Total Settlement</div>
-                        <div style="font-size: 1.5rem; font-weight: 800; color: #1e293b;">₹{selected_record['total_amount']:,.2f}</div>
-                    </div>
-                </div>
-
-                <div style="text-align: center; margin-top: 1.5rem; font-size: 0.75rem; color: #94a3b8;">
-                    Automated transaction record generated by Inventrack &bull; Secure Multi-Tenant Ledger
-                </div>
-            </div>
-        """, unsafe_allow_html=True)
-
-    else:
-        st.info("No transaction records available to generate receipts.")
