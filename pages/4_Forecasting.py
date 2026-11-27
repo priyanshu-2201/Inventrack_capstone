@@ -119,7 +119,8 @@ with col_ds_head:
             <strong>How to read:</strong> Each bar shows the estimated number of days before a product
             runs out of stock, calculated from the weighted average daily sales velocity
             (<strong>V<sub>w</sub> = 0.6 × V<sub>7d</sub> + 0.4 × V<sub>30d</sub></strong>).
-            Shorter bars mean the product needs attention sooner.
+            Shorter bars mean the product needs attention sooner.<br>
+            <span style="font-size: 0.8rem; color: #2563eb;">💡 <strong>Pro Tip:</strong> Click any product in the legend above the chart to toggle it. <strong>Double-click</strong> to isolate that single item.</span>
         </div>
     """, unsafe_allow_html=True)
 
@@ -202,20 +203,22 @@ if not chart_df.empty:
     )
 
     fig_depletion = go.Figure()
-    fig_depletion.add_trace(go.Bar(
-        y=chart_df["name"].str[:25],
-        x=chart_df["display_days"],
-        orientation="h",
-        marker_color=chart_df["bar_color"],
-        text=chart_df["bar_label"],
-        textposition="outside",
-        textfont=dict(color="#1e293b", size=12),
-        hovertemplate=(
-            "<b>%{y}</b><br>"
-            "Days left: %{x:.1f}<br>"
-            "<extra></extra>"
-        )
-    ))
+    for _, row in chart_df.iterrows():
+        fig_depletion.add_trace(go.Bar(
+            name=row["name"],
+            y=[row["name"][:25]],
+            x=[row["display_days"]],
+            orientation="h",
+            marker_color=row["bar_color"],
+            text=row["bar_label"],
+            textposition="outside",
+            textfont=dict(color="#1e293b", size=12),
+            hovertemplate=(
+                f"<b>{row['name']}</b><br>"
+                f"Days left: {row['display_days']:.1f}<br>"
+                "<extra></extra>"
+            )
+        ))
 
     # Add threshold lines
     fig_depletion.add_vline(x=7, line_dash="dash", line_color="#facc15", line_width=1.5,
@@ -228,8 +231,8 @@ if not chart_df.empty:
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font=dict(family="Plus Jakarta Sans", color="#1e293b"),
-        height=max(260, len(chart_df) * 44),
-        margin=dict(l=10, r=80, t=30, b=20),
+        height=max(280, len(chart_df) * 44 + 50),
+        margin=dict(l=10, r=80, t=55, b=20),
         xaxis=dict(
             title="Days Until Stockout",
             title_font=dict(color="#475569"),
@@ -242,10 +245,26 @@ if not chart_df.empty:
             linecolor="#cbd5e1",
             autorange="reversed"
         ),
-        showlegend=False,
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0,
+            font=dict(color="#475569", size=11),
+            itemclick="toggle",
+            itemdoubleclick="toggleothers"
+        )
     )
     st.plotly_chart(fig_depletion, use_container_width=True,
-                    config={"responsive": True, "displayModeBar": True, "displaylogo": False})
+                    config={
+                        "responsive": True,
+                        "displayModeBar": True,
+                        "displaylogo": False,
+                        "doubleClick": "reset+autosize",
+                        "doubleClickDelay": 1000
+                    })
 else:
     st.info("No products match the selected risk category and filter. Adjust the filters above to view predictions.")
 
@@ -260,7 +279,8 @@ with col_tr_head:
     st.markdown("""
         <div style="font-size: 0.88rem; color: #64748b; margin-bottom: 0.5rem; line-height: 1.5;">
             <strong>How to read:</strong> Each colored line tracks a specific product's sales volume over time.
-            Rising curves indicate increasing demand (faster stock depletion), while declining curves indicate slowing sales.
+            Rising curves indicate increasing demand (faster stock depletion), while declining curves indicate slowing sales.<br>
+            <span style="font-size: 0.8rem; color: #2563eb;">💡 <strong>Pro Tip:</strong> Click any product in the legend above the chart to toggle its line. <strong>Double-click</strong> to isolate that single product.</span>
         </div>
     """, unsafe_allow_html=True)
 
@@ -354,8 +374,8 @@ if not sales_only.empty and "transaction_date" in sales_only.columns:
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
             font=dict(family="Plus Jakarta Sans", color="#1e293b"),
-            height=420,
-            margin=dict(l=20, r=20, t=20, b=30),
+            height=460,
+            margin=dict(l=20, r=20, t=55, b=30),
             xaxis=dict(
                 categoryorder="array",
                 categoryarray=periods_ordered,
@@ -373,15 +393,26 @@ if not sales_only.empty and "transaction_date" in sales_only.columns:
             legend=dict(
                 orientation="h",
                 yanchor="bottom",
-                y=-0.28,
-                xanchor="center",
-                x=0.5,
-                font=dict(color="#475569", size=11)
+                y=1.02,
+                xanchor="left",
+                x=0,
+                font=dict(color="#475569", size=11),
+                itemclick="toggle",
+                itemdoubleclick="toggleothers"
             ),
             hovermode="x unified",
         )
-        st.plotly_chart(fig_trends, use_container_width=True,
-                        config={"responsive": True, "displayModeBar": True, "displaylogo": False})
+        st.plotly_chart(
+            fig_trends,
+            use_container_width=True,
+            config={
+                "responsive": True,
+                "displayModeBar": True,
+                "displaylogo": False,
+                "doubleClick": "reset+autosize",
+                "doubleClickDelay": 1000
+            }
+        )
     else:
         st.info("Please select at least one product to display on the trend chart.")
 else:
